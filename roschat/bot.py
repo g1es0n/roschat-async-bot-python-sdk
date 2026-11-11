@@ -68,7 +68,7 @@ class Roschat_Bot:
             START_BOT, 
             {
                 'token': self.token,
-                'bot_name': self.bot_name
+                'name': self.bot_name
             }, 
             callback=self.on_start
         )
@@ -83,6 +83,7 @@ class Roschat_Bot:
     async def send_message(self, params, data, callback=cb_send_message):
         if not params:
             print('Для отправки сообщения необходим, как минимум cid пользователя')
+            return
         if type(params) is int:
             cid = params
             params = {
@@ -96,7 +97,7 @@ class Roschat_Bot:
         params['data'] = data if isinstance(data, str) else json.dumps(data)
         await sio.emit(SEND_BOT_MESSAGE, data=params, callback=callback)
     
-    async def send_message_recieved(self, msg_id, callback=None):
+    async def send_message_received(self, msg_id, callback=None):
         if not msg_id:
             print('Обязательный параметр msg_id не предоставлен')
             return
