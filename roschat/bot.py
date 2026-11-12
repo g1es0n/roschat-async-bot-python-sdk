@@ -1,22 +1,29 @@
 import socketio
 import json
-import sys
 import aiohttp
 import asyncio
-from .constants import START_BOT, SEND_BOT_MESSAGE, BOT_MESSAGE_RECEIVED, BOT_MESSAGE_WATCHED, SEND_BOT_MESSAGE, SEND_BOT_MESSAGE, DELETE_BOT_MESSAGE, SET_BOT_KEYBOARD
+import inspect
+from .constants import START_BOT, SEND_BOT_MESSAGE, BOT_MESSAGE_RECEIVED, BOT_MESSAGE_WATCHED, DELETE_BOT_MESSAGE, SET_BOT_KEYBOARD
 
 
 # sio = socketio.AsyncClient(ssl_verify=False, logger=True, engineio_logger=True)
 sio = socketio.AsyncClient(ssl_verify=False)
 
+AUTH_TIMEOUT = 30
+AUTH_DELAY_MIN = 2 
+AUTH_DELAY_MAX = 60
+
+CONFIG_TIMEOUT = 30
+CONNECT_DELAY_MIN = 2
+CONNECT_DELAY_MAX = 60
+
 @sio.event
 async def disconnect():
     print("Socket соединение разорвано")
 
-async def cb_start_bot(res):
-    if 'error' in res:
+def cb_start_bot(res):
+    if not isinstance(res, dict) or res.get('error'):
         print('Ошибка при инициализации: ', res)
-        await sio.disconnect()
     else:
         print('Бот успешно инициализирован')
 
@@ -30,49 +37,102 @@ class Roschat_Bot:
         self.base_url = base_url
         self.bot_name = bot_name
         self.socket_options = socket_options
+        self.auth_task = None
+        self.authorized = False
     
 
-    async def start(self, on_start):
+    async def start(self, on_start=cb_start_bot):
         self.on_start = on_start
+        if sio.connected:
+            print('Бот уже подключён к серверу')
+            return
+
+        sio.on('connect', self.on_connected)
+        delay = CONNECT_DELAY_MIN
+        while True:
+            try:
+                socket_url = await self.get_socket_url()
+                await sio.connect(socket_url, headers=self.socket_options)
+                return
+            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, socketio.exceptions.ConnectionError) as e:
+                print('Не удалось подключиться к серверу, повтор через', delay, 'сек: ', repr(e))
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, CONNECT_DELAY_MAX)
+
+
+    async def get_socket_url(self):
         server_url = self.base_url + '/ajax/config.json'
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(server_url, ssl=False) as r:
-                    text = await r.text()
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            print(e)
-            sys.exit(1)
+        timeout = aiohttp.ClientTimeout(total=CONFIG_TIMEOUT)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(server_url, ssl=False) as r:
+                text = await r.text()
         server_config = json.loads(text)
         web_sockets_port = server_config.get('webSocketsPortVer4')
-        socket_url = str(self.base_url) + ':' + str(web_sockets_port)
-        try:
-            sio.on('connect', self.on_connected)
-            await sio.connect(socket_url, headers=self.socket_options)
-        
-        except ValueError:
-            print(ValueError)
+        if not web_sockets_port:
+            return str(self.base_url)
+        return str(self.base_url) + ':' + str(web_sockets_port)
 
-        
+
     async def on_connected(self):
         print("Соединился с socket сервером...")
 
-        await asyncio.sleep(2)
-
-        print("Стартую бота...")
-        
-        await self.start_bot()
+        self.authorized = False
+        if self.auth_task and not self.auth_task.done():
+            self.auth_task.cancel()
+        self.auth_task = asyncio.create_task(self.start_bot())
 
 
     async def start_bot(self):
-        await sio.emit(
-            START_BOT, 
-            {
-                'token': self.token,
-                'name': self.bot_name
-            }, 
-            callback=self.on_start
-        )
-    
+        delay = AUTH_DELAY_MIN
+        while True:
+            await asyncio.sleep(delay)
+            if not sio.connected:
+                return
+
+            print("Стартую бота...")
+            try:
+                res = await sio.call(
+                    START_BOT,
+                    {
+                        'token': self.token,
+                        'name': self.bot_name
+                    },
+                    timeout=AUTH_TIMEOUT
+                )
+            except socketio.exceptions.TimeoutError:
+                res = {'error': 'timeout'}
+            except Exception as e:
+                print('Не удалось отправить start-bot: ', e)
+                return
+
+            success = isinstance(res, dict) and not res.get('error')
+            if success:
+                self.authorized = True
+
+            await self.call_on_start(res)
+
+            if success:
+                return
+
+            delay = min(delay * 2, AUTH_DELAY_MAX)
+            print('Авторизация не удалась, повтор через', delay, 'сек: ', res)
+
+
+    async def call_on_start(self, res):
+        if not self.on_start:
+            return
+        try:
+            result = self.on_start(res)
+            if inspect.isawaitable(result):
+                await result
+        except Exception as e:
+            print('Ошибка в on_start: ', e)
+
+
+    @property
+    def is_ready(self):
+        return self.authorized and sio.connected
+
 
     def on(self, event_name, callback):
         sio.on(event_name, handler=callback)
