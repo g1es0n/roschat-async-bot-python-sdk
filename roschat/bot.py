@@ -29,7 +29,7 @@ def cb_start_bot(res):
 
 def cb_send_message(res):
     if not res.get('id'):
-        print('Не удался отправить сообщение: ', res)
+        print('Не удалось отправить сообщение: ', res)
 
 class Roschat_Bot:
     def __init__(self, token, base_url, bot_name, socket_options={'query': 'type-bot', 'rejectUnauthorized': 'false'}):
